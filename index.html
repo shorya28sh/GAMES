@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Mini Arcade — Fixed</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: radial-gradient(circle at center, #0f172a, #020617);
+      color: #fff;
+      font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial;
+      padding: 24px;
+    }
+    .wrap { text-align: center; width: 420px; }
+    h1 { margin-bottom: 16px; }
+    .menu, .game { display: none; flex-direction: column; align-items: center; gap: 12px; }
+    .menu.active, .game.active { display: flex; }
+    .btn {
+      background: #38bdf8; color: #022; border: 0; padding: 10px 18px; border-radius: 8px;
+      cursor: pointer; font-weight: 600;
+    }
+    #gameArea {
+      width: 400px; height: 600px; border-radius: 10px; background: #1e293b;
+      border: 3px solid #38bdf8; position: relative; overflow: hidden;
+    }
+    #player {
+      position: absolute; bottom: 10px; left: 170px; width: 60px; height: 20px;
+      background: #22d3ee; border-radius: 6px;
+    }
+    .ball { position: absolute; width: 20px; height: 20px; border-radius: 50%; background: #fbbf24; }
+    .block { position: absolute; width: 40px; height: 40px; border-radius: 6px; background: #ef4444; }
+    .target { position: absolute; width: 30px; height: 30px; border-radius: 50%; background: #10b981; cursor: pointer; }
+    #score { font-size: 18px; }
+    #controls { display:flex; gap:10px; justify-content:center; margin-top:8px; }
+    .small { padding: 6px 10px; font-size: 14px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Mini Arcade 🎮</h1>
+
+    <div id="menu" class="menu active">
+      <button class="btn" onclick="startGame('catch')">Catch the Ball</button>
+      <button class="btn" onclick="startGame('dodge')">Dodge the Blocks</button>
+      <button class="btn" onclick="startGame('click')">Click the Target</button>
+    </div>
+
+    <div id="game" class="game">
+      <div id="score">Score: 0</div>
+      <div id="gameArea">
+        <!-- player is injected when a game starts -->
+      </div>
+
+      <div id="controls">
+        <button id="restartBtn" class="btn small" style="display:none">Restart</button>
+        <button id="backBtn" class="btn small">Back to Menu</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    /* ---------- Globals & helpers ---------- */
+    const menu = document.getElementById('menu');
+    const gameScreen = document.getElementById('game');
+    const gameArea = document.getElementById('gameArea');
+    const scoreEl = document.getElementById('score');
+    const restartBtn = document.getElementById('restartBtn');
+    const backBtn = document.getElementById('backBtn');
+
+    let player = null;               // DOM node for player
+    let currentGame = null;          // 'catch' | 'dodge' | 'click'
+    let score = 0;
+    let gameOver = false;
+
+    // For cleanup: store all intervals/timeouts/animation ids and elements we create
+    let cleanupHandles = {
+      intervals: new Set(),
+      timeouts: new Set(),
+      rafs: new Set(),
+      spawnedElements: new Set(),
+      mouseHandler: null
+    };
+
+    function addInterval(id) { cleanupHandles.intervals.add(id); }
+    function addTimeout(id) { cleanupHandles.timeouts.add(id); }
+    function addRaf(id) { cleanupHandles.rafs.add(id); }
+    function trackElem(el) { cleanupHandles.spawnedElements.add(el); }
+    function clearAll() {
+      // intervals
+      cleanupHandles.intervals.forEach(id => clearInterval(id));
+      cleanupHandles.intervals.clear();
+      // timeouts
+      cleanupHandles.timeouts.forEach(id => clearTimeout(id));
+      cleanupHandles.timeouts.clear();
+      // rafs
+      cleanupHandles.rafs.forEach(id => cancelAnimationFrame(id));
+      cleanupHandles.rafs.clear();
+      // remove spawned elements
+      cleanupHandles.spawnedElements.forEach(el => {
+        if (el && el.parentNode) el.parentNode.removeChild(el);
+      });
+      cleanupHandles.spawnedElements.clear();
+      // remove mouse handler
+      if (cleanupHandles.mouseHandler) {
+        document.removeEventListener('mousemove', cleanupHandles.mouseHandler);
+        cleanupHandles.mouseHandler = null;
+      }
+    }
+
+    // safe get player rect (if player exists)
+    function getPlayerRect() {
+      return player ? player.getBoundingClientRect() : null;
+    }
+
+    function endGame() {
+      if (gameOver) return;
+      gameOver = true;
+      // clear everything related to the game
+      clearAll();
+      // show restart
+      restartBtn.style.display = 'inline-block';
+      scoreEl.textContent = `Score: ${score} — Game Over!`;
+    }
+
+    function backToMenu() {
+      // cleanup, hide game, show menu
+      clearAll();
+      gameArea.innerHTML = '';
+      player = null;
+      currentGame = null;
+      gameScreen.classList.remove('active');
+      menu.classList.add('active');
+      restartBtn.style.display = 'none';
+      scoreEl.textContent = 'Score: 0';
+    }
+
+    backBtn.addEventListener('click', backToMenu);
+    restartBtn.addEventListener('click', () => {
+      if (currentGame) startGame(currentGame);
+    });
+
+    /* ---------- Start / init helpers ---------- */
+    function startGame(gameName) {
+      // cleanup any previous stuff
+      clearAll();
+      gameArea.innerHTML = ''; // remove all children
+      restartBtn.style.display = 'none';
+      menu.classList.remove('active');
+      gameScreen.classList.add('active');
+
+      // init state
+      currentGame = gameName;
+      gameOver = false;
+      score = 0;
+      scoreEl.textContent = 'Score: 0';
+
+      // inject player (some games hide it)
+      const p = document.createElement('div');
+      p.id = 'player';
+      p.style.left = '170px';
+      gameArea.appendChild(p);
+      player = document.getElementById('player'); // re-select to be safe
+
+      if (gameName === 'catch') startCatch();
+      if (gameName === 'dodge') startDodge();
+      if (gameName === 'click') startClick();
+    }
+
+    /* ---------- Mouse movement (common) ---------- */
+    function enableMouseMoveForPlayer() {
+      // remove old handler if any
+      if (cleanupHandles.mouseHandler) {
+        document.removeEventListener('mousemove', cleanupHandles.mouseHandler);
+        cleanupHandles.mouseHandler = null;
+      }
+      const handler = (e) => {
+        const rect = gameArea.getBoundingClientRect();
+        // only react if mouse within or near container horizontally
+        let x = e.clientX - rect.left - (player.offsetWidth / 2);
+        x = Math.max(0, Math.min(rect.width - player.offsetWidth, x));
+        player.style.left = `${x}px`;
+      };
+      cleanupHandles.mouseHandler = handler;
+      document.addEventListener('mousemove', handler);
+    }
+
+    /* ---------- Catch the Ball ---------- */
+    function startCatch() {
+      player.style.display = 'block';
+      enableMouseMoveForPlayer();
+
+      // spawn loop
+      const spawner = setInterval(() => {
+        if (gameOver) return;
+        const ball = document.createElement('div');
+        ball.className = 'ball';
+        // start slightly above viewport so it's visible when moving
+        ball.style.top = '-24px';
+        const left = Math.floor(Math.random() * (gameArea.clientWidth - 20));
+        ball.style.left = left + 'px';
+        gameArea.appendChild(ball);
+        trackElem(ball);
+
+        // animate with requestAnimationFrame for smoother motion
+        let speed = 2.5 + Math.random() * 2.5; // px per frame-ish
+        function step() {
+          if (gameOver) {
+            if (ball.parentNode) ball.parentNode.removeChild(ball);
+            cleanupHandles.spawnedElements.delete(ball);
+            return;
+          }
+          const currentTop = parseFloat(ball.style.top || 0);
+          ball.style.top = (currentTop + speed) + 'px';
+
+          // collision detection (use viewport rects)
+          const ballRect = ball.getBoundingClientRect();
+          const playerRect = getPlayerRect();
+          const areaRect = gameArea.getBoundingClientRect();
+
+          // caught?
+          if (playerRect &&
+              ballRect.bottom >= playerRect.top &&
+              ballRect.right > playerRect.left &&
+              ballRect.left < playerRect.right) {
+            // caught
+            score++;
+            scoreEl.textContent = 'Score: ' + score;
+            if (ball.parentNode) ball.parentNode.removeChild(ball);
+            cleanupHandles.spawnedElements.delete(ball);
+            return;
+          }
+
+          // missed (fell beyond area)
+          if (ballRect.top > areaRect.bottom) {
+            // miss = end game (original game ended on first miss)
+            if (ball.parentNode) ball.parentNode.removeChild(ball);
+            cleanupHandles.spawnedElements.delete(ball);
+            endGame();
+            return;
+          }
+
+          const rafId = requestAnimationFrame(step);
+          addRaf(rafId);
+        }
+        const rafId = requestAnimationFrame(step);
+        addRaf(rafId);
+      }, 900);
+      addInterval(spawner);
+    }
+
+    /* ---------- Dodge the Blocks ---------- */
+    function startDodge() {
+      player.style.display = 'block';
+      enableMouseMoveForPlayer();
+
+      // spawn loop: avoid blocks, score increments for each block dodged
+      const spawner = setInterval(() => {
+        if (gameOver) return;
+        const block = document.createElement('div');
+        block.className = 'block';
+        block.style.top = '-44px';
+        const left = Math.floor(Math.random() * (gameArea.clientWidth - 40));
+        block.style.left = left + 'px';
+        gameArea.appendChild(block);
+        trackElem(block);
+
+        let speed = 3 + Math.random() * 3;
+        function step() {
+          if (gameOver) {
+            if (block.parentNode) block.parentNode.removeChild(block);
+            cleanupHandles.spawnedElements.delete(block);
+            return;
+          }
+          const currentTop = parseFloat(block.style.top || 0);
+          block.style.top = (currentTop + speed) + 'px';
+
+          const blockRect = block.getBoundingClientRect();
+          const playerRect = getPlayerRect();
+          const areaRect = gameArea.getBoundingClientRect();
+
+          // collision -> end the game
+          if (playerRect &&
+              blockRect.bottom >= playerRect.top &&
+              blockRect.left < playerRect.right &&
+              blockRect.right > playerRect.left) {
+            if (block.parentNode) block.parentNode.removeChild(block);
+            cleanupHandles.spawnedElements.delete(block);
+            endGame();
+            return;
+          }
+
+          // if passed bottom, count as dodged
+          if (blockRect.top > areaRect.bottom) {
+            if (block.parentNode) block.parentNode.removeChild(block);
+            cleanupHandles.spawnedElements.delete(block);
+            score++;
+            scoreEl.textContent = 'Score: ' + score;
+            return;
+          }
+
+          const rafId = requestAnimationFrame(step);
+          addRaf(rafId);
+        }
+        const rafId = requestAnimationFrame(step);
+        addRaf(rafId);
+      }, 750);
+      addInterval(spawner);
+    }
+
+    /* ---------- Click the Target ---------- */
+    function startClick() {
+      // click game: hide player, spawn clickable targets that vanish
+      player.style.display = 'none';
+      // game lasts fixed duration (20s)
+      const DURATION = 20_000;
+      const SPAWN_MS = 700;
+
+      // spawn loop
+      const spawner = setInterval(() => {
+        if (gameOver) return;
+        const t = document.createElement('div');
+        t.className = 'target';
+        t.style.top = Math.max(0, Math.floor(Math.random() * (gameArea.clientHeight - 30))) + 'px';
+        t.style.left = Math.max(0, Math.floor(Math.random() * (gameArea.clientWidth - 30))) + 'px';
+        gameArea.appendChild(t);
+        trackElem(t);
+
+        // when clicked
+        const clicked = () => {
+          score++;
+          scoreEl.textContent = 'Score: ' + score;
+          if (t.parentNode) t.parentNode.removeChild(t);
+          cleanupHandles.spawnedElements.delete(t);
+        };
+        t.addEventListener('click', clicked);
+
+        // auto-remove after 1s to keep things moving
+        const to = setTimeout(() => {
+          if (t.parentNode) t.parentNode.removeChild(t);
+          cleanupHandles.spawnedElements.delete(t);
+        }, 1000);
+        addTimeout(to);
+      }, SPAWN_MS);
+      addInterval(spawner);
+
+      // end after duration
+      const endTo = setTimeout(() => endGame(), DURATION);
+      addTimeout(endTo);
+    }
+
+    // Expose startGame to global so buttons can call it (already called above)
+    window.startGame = startGame;
+
+    // initial UI state
+    menu.classList.add('active');
+  </script>
+</body>
+</html>
